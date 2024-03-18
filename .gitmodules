@@ -1,0 +1,9 @@
+[submodule "glm"]
+	path = dependencies/glm
+	url = https://github.com/g-truc/glm.git
+[submodule "dependencies/oak"]
+	path = dependencies/oak
+	url = git@github.com:hibiscus-tools/oak.git
+[submodule "dependencies/imgui"]
+	path = dependencies/imgui
+	url = https://github.com/ocornut/imgui
