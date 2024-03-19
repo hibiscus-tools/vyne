@@ -1,5 +1,9 @@
 #pragma once
 
+#include <cstdint>
+
+#include <glm/glm.hpp>
+
 // Vector constructors
 __forceinline__ __host__ __device__
 float3 make_float3(float2 v, float x)
@@ -115,4 +119,21 @@ __forceinline__ __host__ __device__
 float length(float2 v)
 {
 	return sqrt(v.x * v.x + v.y * v.y);
+}
+
+// Color utilities
+__forceinline__ __host__ __device__
+uchar4 rgb_to_uchar4(float3 c)
+{
+	uint32_t r = 255.0f * c.x;
+	uint32_t g = 255.0f * c.y;
+	uint32_t b = 255.0f * c.z;
+	return make_uchar4(r, g, b, 0xff);
+}
+
+// Miscellaneous utiltiies
+__forceinline__ __host__ __device__
+float3 glm_to_float3(const glm::vec3 &v)
+{
+	return make_float3(v.x, v.y, v.z);
 }

@@ -1,8 +1,11 @@
 #pragma once
 
 #include <optix/optix.h>
+#include <optix/optix_stubs.h>
 
 #include <oak/mesh.hpp>
+
+#include <microlog/microlog.h>
 
 #include "cuda/util.cuh"
 

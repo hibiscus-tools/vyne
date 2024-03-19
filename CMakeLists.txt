@@ -44,6 +44,7 @@ add_executable(ssdfg
 	source/io.cpp
 	source/cuda/interop.cu
 	source/ssdfg/contexts.cu
+	source/ssdfg/kernels.cu
 )
 
 target_link_libraries(

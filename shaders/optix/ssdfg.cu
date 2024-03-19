@@ -13,17 +13,14 @@ extern "C" __global__ void __raygen__()
 {
 	const uint3 idx = optixGetLaunchIndex();
 	const uint2 extent = packet.resolution;
-	const uint32_t index = idx.x + idx.y * extent.x;
 
-	float2 uv = make_float2(idx.x + 0.5, idx.y + 0.5) / make_float2(extent.x, extent.y);
-	uv = make_float2(uv.x, 1 - uv.y);
+	float2 uv = make_float2(idx.x + 0.5, extent.y - (idx.y + 0.5)) / make_float2(extent.x, extent.y);
+//	uv = make_float2(uv.x, 1 - uv.y);
 	float3 ray = ray_at_uv(uv);
 
+	uint index = idx.x + idx.y * extent.x;
 	packet.visibility[index] = 0;
-
-	unsigned int i0;
-	unsigned int i1;
-	pack_pointer(&packet.visibility[index], i0, i1);
+	packet.depth[index] = -1;
 
 	optixTrace
 	(
@@ -32,20 +29,15 @@ extern "C" __global__ void __raygen__()
 		0, 1e16, 0,
 		OptixVisibilityMask(0xff),
 		OPTIX_RAY_FLAG_DISABLE_ANYHIT,
-		0, 1, 0, i0, i1
+		0, 1, 0, index
 	);
 }
 
 extern "C" __global__ void __closesthit__()
 {
-	unsigned int i0 = optixGetPayload_0();
-	unsigned int i1 = optixGetPayload_1();
-	float *fbptr = unpack_pointer <float> (i0, i1);
-	*fbptr = 1.0f;
+	uint index = optixGetPayload_0();
+	packet.visibility[index] = 1;
+	packet.depth[index] = optixGetRayTmax();
 }
 
-extern "C" __global__ void __miss__()
-{
-	unsigned int i0 = optixGetPayload_0();
-	unsigned int i1 = optixGetPayload_1();
-}
+extern "C" __global__ void __miss__() {}

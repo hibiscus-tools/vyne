@@ -24,6 +24,7 @@
 #include "io.hpp"
 #include "shaders/optix/ssdfg.cuh"
 #include "ssdfg/contexts.cuh"
+#include "ssdfg/kernels.cuh"
 #include "util.hpp"
 
 struct Bounds {
@@ -137,196 +138,6 @@ void handle_key_input(GLFWwindow *const win, Transform &camera_transform)
 	camera_transform.position += velocity;
 }
 
-inline float3 glm_to_float3(const glm::vec3 &v)
-{
-	return make_float3(v.x, v.y, v.z);
-}
-
-__global__
-void silhouette_edges
-(
-	const float *__restrict__ visibility,
-	float *__restrict__ convolved,
-	int32_t width,
-	int32_t height
-)
-{
-	// Kernel width is 3x3
-	int32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
-	int32_t stride = blockDim.x * gridDim.x;
-
-	for (int32_t i = tid; i < width * height; i += stride) {
-		static constexpr int32_t dx[] = { 1, 1, -1, -1 };
-		static constexpr int32_t dy[] = { 1, -1, 1, -1 };
-
-		float kvalue = 4 * visibility[i];
-
-		int32_t x = i % width;
-		int32_t y = i / width;
-		for (uint32_t j = 0; j < 4; j++) {
-			int32_t nx = x + dx[j];
-			int32_t ny = y + dy[j];
-
-			if (nx < 0 || nx >= width)
-				continue;
-
-			if (ny < 0 || ny >= height)
-				continue;
-
-			int32_t ni = nx + ny * width;
-
-			kvalue -= visibility[ni];
-		}
-
-		convolved[i] = fabs(kvalue);
-	}
-}
-
-__global__
-void signed_distance_field
-(
-	const float *__restrict__ visibility,
-	const float *__restrict__ silhouette,
-	float *__restrict__ sdf,
-	uint32_t width,
-	uint32_t height
-)
-{
-
-	int32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
-	int32_t stride = blockDim.x * gridDim.x;
-
-	float2 extent = make_float2(width, height);
-	for (int32_t i = tid; i < width * height; i += stride) {
-		float2 p = make_float2(i % width, i / width)/extent;
-
-		// Search the entire image and compute the closest point
-		// TODO: try the spiral method, and then the shore waves method/wav propogation method
-		float d = FLT_MAX;
-		for (int32_t x = 0; x < width; x++) {
-			for (int32_t y = 0; y < height; y++) {
-				int32_t ni = x + y * width;
-
-				if (silhouette[ni] > 0) {
-					float2 np = make_float2(x, y)/extent;
-					d = fmin(d, length(p - np));
-				}
-			}
-		}
-
-		sdf[i] = d * (1 - 2 * (visibility[i] > 0));
-	}
-}
-
-__global__
-void sdf_spatial_gradient
-(
-	const float *__restrict__ sdf,
-	float2 *__restrict__ gradients,
-	uint32_t width,
-	uint32_t height
-)
-{
-	int32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
-	int32_t stride = blockDim.x * gridDim.x;
-
-	float2 extent = make_float2(width, height);
-	for (int32_t i = tid; i < width * height; i += stride) {
-		// Horizontal gradient
-		int32_t x = i % width;
-		int32_t y = i / width;
-
-		int32_t px = max(0, x - 1);
-		int32_t nx = min(x + 1, width - 1);
-
-		float sdfpx = sdf[px + y * width];
-		float sdfnx = sdf[nx + y * width];
-		float dx = width * (sdfnx - sdfpx)/(nx - px);
-
-		int32_t py = max(0, y - 1);
-		int32_t ny = min(y + 1, height - 1);
-
-		float sdfpy = sdf[x + py * width];
-		float sdfny = sdf[x + ny * width];
-		float dy = height * (sdfny - sdfpy)/(ny - py);
-
-		gradients[i] = make_float2(dx, dy);
-	}
-}
-
-__forceinline__ __host__ __device__
-uchar4 rgb_to_uchar4(float3 c)
-{
-	uint32_t r = 255.0f * c.x;
-	uint32_t g = 255.0f * c.y;
-	uint32_t b = 255.0f * c.z;
-	return make_uchar4(r, g, b, 0xff);
-}
-
-__global__
-void display_silhouette
-(
-	const float *__restrict__ visibility,
-	cudaSurfaceObject_t fb,
-	uint32_t width,
-	uint32_t height
-)
-{
-	uint32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
-	uint32_t stride = blockDim.x * gridDim.x;
-
-	for (uint32_t i = tid; i < width * height; i += stride) {
-		int32_t x = i % width;
-		int32_t y = i / width;
-		if (visibility[i] > 0)
-			surf2Dwrite(make_uchar4(0, 0, 0, 255), fb, x * sizeof(uchar4), y);
-		else
-			surf2Dwrite(make_uchar4(150, 150, 150, 255), fb, x * sizeof(uchar4), y);
-	}
-}
-
-__global__
-void display_sdf
-(
-	const float *__restrict__ sdf,
-	cudaSurfaceObject_t fb,
-	uint32_t width,
-	uint32_t height
-)
-{
-	uint32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
-	uint32_t stride = blockDim.x * gridDim.x;
-
-	for (uint32_t i = tid; i < width * height; i += stride) {
-		int32_t x = i % width;
-		int32_t y = i / width;
-		float k = 0.5 + 0.5 * cos(128.0f * sdf[i]);
-		float3 blue = k * make_float3(0.2, 0.5, 1.0);
-		float3 red = (1 - k) * make_float3(1.0, 0.5, 0.2);
-		surf2Dwrite(rgb_to_uchar4(blue + red), fb, x * sizeof(uchar4), y);
-	}
-}
-
-__global__
-void display_sdf_gradients
-(
-	const float2 *__restrict__ gradients,
-	cudaSurfaceObject_t fb,
-	uint32_t width,
-	uint32_t height
-)
-{
-	uint32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
-	uint32_t stride = blockDim.x * gridDim.x;
-
-	for (uint32_t i = tid; i < width * height; i += stride) {
-		int32_t x = i % width;
-		int32_t y = i / width;
-		float3 color = make_float3(0.5 + 0.5 * gradients[i], 0);
-		surf2Dwrite(rgb_to_uchar4(color), fb, x * sizeof(uchar4), y);
-	}
-}
-
 int main()
 {
 	static const std::vector <const char *> extensions {
@@ -394,71 +205,65 @@ int main()
 
 	// Load the meshes
 	Mesh target = load_geometry(VYNE_ROOT "/data/spot.obj").front();
+	Mesh source = load_geometry(VYNE_ROOT "/data/sphere.obj").front();
+	auto target_src = SilhouetteRenderContext::from(drc, optix_context, program_groups, target, extent);
+	auto source_src = SilhouetteRenderContext::from(drc, optix_context, program_groups, source, extent);
 
-	auto src = SilhouetteRenderContext::from(drc, optix_context, program_groups, target, extent);
-
-	// Allocate the parameters
-	Packet packet;
+	// Camera parameters
 	Camera camera;
 	Transform camera_transform;
-
 	glfwSetWindowUserPointer(drc.window->handle, &camera_transform);
 
-	CUdeviceptr device_packet = cuda_element_buffer(packet);
-
 	// Differentiable rendering process
-	auto rtx_functor = [&]() {
+	const littlevk::ImageCreateInfo image_info {
+		.width = extent.width,
+		.height = extent.height,
+		.format = drc.swapchain.format,
+		.usage = vk::ImageUsageFlagBits::eSampled
+			| vk::ImageUsageFlagBits::eTransferDst,
+		.aspect = vk::ImageAspectFlagBits::eColor,
+		.external = true
+	};
+
+	auto sampler = littlevk::SamplerCompiler(drc.device, drc.dal);
+	auto motion_gradients_lfb = LinkedFramebuffer::from(drc, image_info, sampler);
+
+	float2 *motion_gradients = (float2 *) cuda_alloc_buffer(sizeof(float2) * extent.width * extent.height);
+
+	auto render = [&]() {
 		camera.aspect = float(extent.width)/float(extent.height);
+		target_src.render(pipeline, camera, camera_transform);
+		source_src.render(pipeline, camera, camera_transform);
 
-		RayFrame rayframe = camera.rayframe(camera_transform);
-		packet.origin = glm_to_float3(rayframe.origin);
-		packet.lower_left = glm_to_float3(rayframe.lower_left);
-		packet.horizontal = glm_to_float3(rayframe.horizontal);
-		packet.vertical = glm_to_float3(rayframe.vertical);
-
-		packet.visibility = src.visibility;
-		packet.resolution = make_uint2(extent.width, extent.height);
-
-		packet.gas = src.gas;
-
-		cuda_element_copy(device_packet, packet);
-
-		optixLaunch
+		image_space_motion_gradients <<< 64, 128 >>>
 		(
-			pipeline, 0,
-			device_packet, sizeof(Packet), &src.sbt,
-			extent.width, extent.height, 1
+			target_src.sdf,
+			target_src.gradients,
+			source_src.sdf,
+			source_src.gradients,
+			motion_gradients,
+			extent.width,
+			extent.height
 		);
 
 		cudaDeviceSynchronize();
 
-		// TODO: cuStreams
-		silhouette_edges <<<64, 128>>> (src.visibility, src.boundary, extent.width, extent.height);
-		cudaDeviceSynchronize();
+		render_image_space_vectors <<< 64, 128 >>>
+		(
+			motion_gradients,
+			motion_gradients_lfb.surface,
+			extent.width,
+			extent.height
+		);
 
-		signed_distance_field <<<64, 128>>> (src.visibility, src.boundary, src.sdf, extent.width, extent.height);
-		cudaDeviceSynchronize();
-
-		sdf_spatial_gradient <<<64, 128>>> (src.sdf, src.gradients, extent.width, extent.height);
-		cudaDeviceSynchronize();
-
-		display_silhouette <<<64, 128>>> (src.visibility, src.visibility_lfb.surface, extent.width, extent.height);
-		cudaDeviceSynchronize();
-
-		display_silhouette <<<64, 128>>> (src.boundary, src.boundary_lfb.surface, extent.width, extent.height);
-		cudaDeviceSynchronize();
-
-		display_sdf <<<64, 128>>> (src.sdf, src.sdf_lfb.surface, extent.width, extent.height);
-		cudaDeviceSynchronize();
-
-		display_sdf_gradients <<<64, 128>>> (src.gradients, src.gradients_lfb.surface, extent.width, extent.height);
 		cudaDeviceSynchronize();
 	};
 
 	std::vector <vk::DescriptorSet> views;
-	views.push_back(src.visibility_lfb.imgui);
-	views.push_back(src.sdf_lfb.imgui);
-	views.push_back(src.gradients_lfb.imgui);
+	views.push_back(target_src.visibility_lfb.imgui);
+	views.push_back(target_src.gradients_lfb.imgui);
+	views.push_back(source_src.visibility_lfb.imgui);
+	views.push_back(source_src.gradients_lfb.imgui);
 
 	// Render loop
 	size_t frame = 0;
@@ -470,7 +275,7 @@ int main()
 
 		auto [cmd, op] = *drc.new_frame(frame);
 
-		rtx_functor();
+		render();
 
 		LiveRenderContext(drc, rc).begin_render_pass(cmd, op);
 
@@ -480,14 +285,42 @@ int main()
 
 		if (ImGui::BeginMainMenuBar()) {
 			if (ImGui::BeginMenu("View")) {
-				if (ImGui::MenuItem("Silhouette"))
-					views.push_back(src.visibility_lfb.imgui);
-				if (ImGui::MenuItem("Silhouette Boundary"))
-					views.push_back(src.boundary_lfb.imgui);
-				if (ImGui::MenuItem("Signed distance field"))
-					views.push_back(src.sdf_lfb.imgui);
-				if (ImGui::MenuItem("SDF gradients"))
-					views.push_back(src.gradients_lfb.imgui);
+				if (ImGui::BeginMenu("Target")) {
+					if (ImGui::MenuItem("Silhouette"))
+						views.push_back(target_src.visibility_lfb.imgui);
+					if (ImGui::MenuItem("Silhouette boundary"))
+						views.push_back(target_src.boundary_lfb.imgui);
+					if (ImGui::MenuItem("Depth map"))
+						views.push_back(target_src.depth_lfb.imgui);
+					if (ImGui::MenuItem("Signed distance field"))
+						views.push_back(target_src.sdf_lfb.imgui);
+					if (ImGui::MenuItem("SDF gradients"))
+						views.push_back(target_src.gradients_lfb.imgui);
+
+					ImGui::EndMenu();
+				}
+
+				if (ImGui::BeginMenu("Source")) {
+					if (ImGui::MenuItem("Silhouette"))
+						views.push_back(source_src.visibility_lfb.imgui);
+					if (ImGui::MenuItem("Silhouette boundary"))
+						views.push_back(source_src.boundary_lfb.imgui);
+					if (ImGui::MenuItem("Depth map"))
+						views.push_back(source_src.depth_lfb.imgui);
+					if (ImGui::MenuItem("Signed distance field"))
+						views.push_back(source_src.sdf_lfb.imgui);
+					if (ImGui::MenuItem("SDF gradients"))
+						views.push_back(source_src.gradients_lfb.imgui);
+
+					ImGui::EndMenu();
+				}
+
+				if (ImGui::BeginMenu("Additional")) {
+					if (ImGui::MenuItem("Motion gradients"))
+						views.push_back(motion_gradients_lfb.imgui);
+
+					ImGui::EndMenu();
+				}
 
 				ImGui::EndMenu();
 			}

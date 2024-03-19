@@ -15,8 +15,8 @@ struct Packet {
 	OptixTraversableHandle gas;
 
 	// Framebuffer and resolution
-//	uint32_t *__restrict__ fb;
 	float *__restrict__ visibility;
+	float *__restrict__ depth;
 	uint2 resolution;
 };
 
