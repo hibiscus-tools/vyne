@@ -58,16 +58,22 @@ SilhouetteRenderContext SilhouetteRenderContext::from
 	auto visibility_lfb = LinkedFramebuffer::from(drc, image_info, sampler);
 	auto depth_lfb = LinkedFramebuffer::from(drc, image_info, sampler);
 	auto boundary_lfb = LinkedFramebuffer::from(drc, image_info, sampler);
+	auto render_lfb = LinkedFramebuffer::from(drc, image_info, sampler);
+
 	auto sdf_lfb = LinkedFramebuffer::from(drc, image_info, sampler);
+	auto barycentrics_lfb = LinkedFramebuffer::from(drc, image_info, sampler);
 	auto gradients_lfb = LinkedFramebuffer::from(drc, image_info, sampler);
 
 	// Allocate the computation buffers
 	size_t pixels = extent.width * extent.height;
-	float *visibility = (float *) cuda_alloc_buffer(sizeof(float) * pixels);
-	float *depth = (float *) cuda_alloc_buffer(sizeof(float) * pixels);
-	float *boundary = (float *) cuda_alloc_buffer(sizeof(float) * pixels);
-	float *sdf = (float *) cuda_alloc_buffer(sizeof(float) * pixels);
-	float2 *gradients = (float2 *) cuda_alloc_buffer(sizeof(float2) * pixels);
+	float *visibility = (float *) cuda_alloc(sizeof(float) * pixels);
+	float *depth = (float *) cuda_alloc(sizeof(float) * pixels);
+	int32_t *primitive = (int32_t *) cuda_alloc(sizeof(int32_t) * pixels);
+	float2 *barycentrics = (float2 *) cuda_alloc(sizeof(float2) * pixels);
+
+	float *boundary = (float *) cuda_alloc(sizeof(float) * pixels);
+	float *sdf = (float *) cuda_alloc(sizeof(float) * pixels);
+	float2 *gradients = (float2 *) cuda_alloc(sizeof(float2) * pixels);
 
 	// Packet for raytracing
 	Packet packet;
@@ -77,21 +83,53 @@ SilhouetteRenderContext SilhouetteRenderContext::from
 		.visibility_lfb = visibility_lfb,
 		.depth_lfb = depth_lfb,
 		.boundary_lfb = boundary_lfb,
+		.render_lfb = render_lfb,
+
 		.sdf_lfb = sdf_lfb,
+		.barycentrics_lfb = barycentrics_lfb,
 		.gradients_lfb = gradients_lfb,
 
 		.sbt = sbt,
 		.gas = gas,
 		.device_packet = device_packet,
 
-		.visibility = visibility,
-		.depth = depth,
-		.boundary = boundary,
-		.sdf = sdf,
-		.gradients = gradients,
+		.render_targets {
+			.visibility = visibility,
+			.depth = depth,
+			.primitives = primitive,
+			.barycentrics = barycentrics,
+			.render = cuda_alloc_buffer <float3> (pixels)
+		},
+
+		.image_space {
+			.boundary = boundary,
+			.sdf = sdf,
+			.gradients = gradients,
+		},
+
+		.mesh {
+			.triangles = (uint3 *) cuda_vector_buffer(mesh.triangles),
+			.vgradients = cuda_alloc_buffer <float3> (mesh.positions.size()),
+			.counts = cuda_alloc_buffer <uint> (mesh.positions.size())
+		},
 
 		.extent = extent
 	};
+}
+
+void SilhouetteRenderContext::update(const OptixDeviceContext &optix_context, const Mesh &new_mesh)
+{
+	if (mesh.triangles)
+		cudaFree(mesh.triangles);
+	if (mesh.vgradients)
+		cudaFree(mesh.vgradients);
+	if (mesh.counts)
+		cudaFree(mesh.counts);
+
+	gas = gas_from_mesh(optix_context, new_mesh);
+	mesh.triangles = (uint3 *) cuda_vector_buffer(new_mesh.triangles);
+	mesh.vgradients = cuda_alloc_buffer <float3> (new_mesh.positions.size());
+	mesh.counts = cuda_alloc_buffer <uint> (new_mesh.positions.size());
 }
 
 void SilhouetteRenderContext::render(const OptixPipeline &pipeline, const Camera &camera, const Transform &camera_transform)
@@ -100,20 +138,26 @@ void SilhouetteRenderContext::render(const OptixPipeline &pipeline, const Camera
 
 	RayFrame rayframe = camera.rayframe(camera_transform);
 
+	packet.gas = gas;
+
 	packet.origin = glm_to_float3(rayframe.origin);
 	packet.lower_left = glm_to_float3(rayframe.lower_left);
 	packet.horizontal = glm_to_float3(rayframe.horizontal);
 	packet.vertical = glm_to_float3(rayframe.vertical);
+
+	packet.visibility = render_targets.visibility;
+	packet.depth = render_targets.depth;
+	packet.primitive = render_targets.primitives;
+	packet.barycentrics = render_targets.barycentrics;
+	packet.render = render_targets.render;
+
 	packet.resolution = make_uint2(extent.width, extent.height);
-	packet.visibility = visibility;
-	packet.depth = depth;
-	packet.gas = gas;
 
 	cuda_element_copy(device_packet, packet);
 
 	optixLaunch
 	(
-		pipeline, 0,
+		pipeline, nullptr,
 		device_packet, sizeof(Packet), &sbt,
 		extent.width, extent.height, 1
 	);
@@ -121,27 +165,33 @@ void SilhouetteRenderContext::render(const OptixPipeline &pipeline, const Camera
 	cudaDeviceSynchronize();
 
 	// TODO: cuStreams
-	silhouette_edges <<<64, 128>>> (visibility, boundary, extent.width, extent.height);
+	silhouette_edges <<<64, 128>>> (render_targets.visibility, image_space.boundary, extent.width, extent.height);
 	cudaDeviceSynchronize();
 
-	signed_distance_field <<< 64, 128 >>> (visibility, boundary, sdf, extent.width, extent.height);
+	signed_distance_field <<< 64, 128 >>> (render_targets.visibility, image_space.boundary, image_space.sdf, extent.width, extent.height);
 	cudaDeviceSynchronize();
 
-	sdf_spatial_gradient <<< 64, 128 >>> (sdf, gradients, extent.width, extent.height);
+	sdf_spatial_gradient <<< 64, 128 >>> (image_space.sdf, image_space.gradients, extent.width, extent.height);
 	cudaDeviceSynchronize();
 
-	render_mask <<< 64, 128 >>> (visibility, visibility_lfb.surface, extent.width, extent.height);
+	render_mask <<< 64, 128 >>> (render_targets.visibility, visibility_lfb.surface, extent.width, extent.height);
 	cudaDeviceSynchronize();
 
-	render_mask <<< 64, 128 >>> (boundary, boundary_lfb.surface, extent.width, extent.height);
+	render_mask <<< 64, 128 >>> (image_space.boundary, boundary_lfb.surface, extent.width, extent.height);
 	cudaDeviceSynchronize();
 
-	render_scalar_field <<< 64, 128 >>> (depth, depth_lfb.surface, extent.width, extent.height);
+	render_scalar_field <<< 64, 128 >>> (render_targets.depth, depth_lfb.surface, extent.width, extent.height);
 	cudaDeviceSynchronize();
 
-	render_sdf <<< 64, 128 >>> (sdf, sdf_lfb.surface, extent.width, extent.height);
+	render_sdf <<< 64, 128 >>> (image_space.sdf, sdf_lfb.surface, extent.width, extent.height);
 	cudaDeviceSynchronize();
 
-	render_image_space_vectors <<< 64, 128 >>> (gradients, gradients_lfb.surface, extent.width, extent.height);
+	render_image_space_vectors <<< 64, 128 >>> (image_space.gradients, gradients_lfb.surface, extent.width, extent.height);
+	cudaDeviceSynchronize();
+
+	render_vector_color <<< 64, 128 >>> (render_targets.barycentrics, barycentrics_lfb.surface, extent.width, extent.height);
+	cudaDeviceSynchronize();
+
+	render_vector_color <<< 64, 128 >>> (render_targets.render, render_lfb.surface, extent.width, extent.height);
 	cudaDeviceSynchronize();
 }

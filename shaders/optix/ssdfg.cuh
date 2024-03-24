@@ -14,9 +14,17 @@ struct Packet {
 	// Handle to the surface
 	OptixTraversableHandle gas;
 
-	// Framebuffer and resolution
-	float *__restrict__ visibility;
-	float *__restrict__ depth;
+	// Mesh properties
+	uint3 *triangles;
+	float3 *normals;
+
+	// Framebuffers and resolution
+	float *visibility;
+	float *depth;
+	int32_t *primitive;
+	float2 *barycentrics;
+	float3 *render;
+
 	uint2 resolution;
 };
 

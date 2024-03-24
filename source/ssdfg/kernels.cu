@@ -1,5 +1,7 @@
 #include <limits>
 
+#include <surface_indirect_functions.h>
+
 #include "cuda/vector_math.cuh"
 #include "ssdfg/kernels.cuh"
 
@@ -94,10 +96,10 @@ void sdf_spatial_gradient
 
 	float2 extent = make_float2(width, height);
 	for (int32_t i = tid; i < width * height; i += stride) {
-		// Horizontal gradient
 		int32_t x = i % width;
 		int32_t y = i / width;
 
+		// Horizontal gradient
 		int32_t px = max(0, x - 1);
 		int32_t nx = min(x + 1, width - 1);
 
@@ -105,6 +107,7 @@ void sdf_spatial_gradient
 		float sdfnx = sdf[nx + y * width];
 		float dx = width * (sdfnx - sdfpx)/(nx - px);
 
+		// Vertical gradient
 		int32_t py = max(0, y - 1);
 		int32_t ny = min(y + 1, height - 1);
 
@@ -141,6 +144,99 @@ void image_space_motion_gradients
 
 		motion_gradients[i] = 2 * (psi - phi) * (psi_grad - phi_grad);
 	}
+}
+
+__global__
+void project_image_space_vectors
+(
+	const float *__restrict__ visibility,
+	const float *__restrict__ depth,
+	const float2 *__restrict__ vectors,
+	float3 *__restrict__ projected,
+	float3 horizontal,
+	float3 vertical,
+	uint32_t width,
+	uint32_t height
+)
+{
+	int32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+	int32_t stride = blockDim.x * gridDim.x;
+
+	for (int32_t i = tid; i < width * height; i += stride) {
+		if (visibility[i] <= 0) {
+			projected[i] = make_float3(0, 0, 0);
+			continue;
+		}
+
+//		float2 vector = vectors[i] * depth[i];
+		float2 vector = vectors[i];
+
+		// TODO: negate the y direction?
+		projected[i] = vector.x * horizontal + vector.y * vertical;
+	}
+}
+
+__forceinline__ __device__
+float3 atomicAdd(float3 *addr, float3 val)
+{
+	float x = atomicAdd(&addr->x, val.x);
+	float y = atomicAdd(&addr->y, val.y);
+	float z = atomicAdd(&addr->z, val.z);
+	return make_float3(x, y, z);
+}
+
+__global__
+void scatter_reduce_mesh_gradient
+(
+	const float3 *__restrict__ projected,
+	const float2 *__restrict__ barycentrics,
+	const uint3 *__restrict__ triangles,
+	const int32_t *__restrict__ primitives,
+	float3 *__restrict__ gradients,
+	uint *__restrict__ counts,
+	uint32_t width,
+	uint32_t height
+)
+{
+	int32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+	int32_t stride = blockDim.x * gridDim.x;
+
+	for (int32_t i = tid; i < width * height; i += stride) {
+		float3 proj = projected[i];
+		if (length(proj) < 1e-6)
+			continue;
+
+		uint index = primitives[i];
+		uint3 triangle = triangles[index];
+		float2 bary = barycentrics[i];
+
+		float3 v0 = (1 - bary.x - bary.y) * proj;
+		float3 v1 = bary.x * proj;
+		float3 v2 = bary.y * proj;
+
+		atomicAdd(&gradients[triangle.x], v0);
+		atomicAdd(&gradients[triangle.y], v1);
+		atomicAdd(&gradients[triangle.z], v2);
+
+		atomicAdd(&counts[triangle.x], 1);
+		atomicAdd(&counts[triangle.y], 1);
+		atomicAdd(&counts[triangle.z], 1);
+	}
+}
+
+__global__
+void scatter_reduce_integrate
+(
+	float3 *__restrict__ gradients,
+	const uint *__restrict__ samples,
+	uint32_t size
+)
+{
+	int32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+	int32_t stride = blockDim.x * gridDim.x;
+
+	for (int32_t i = tid; i < size; i += stride)
+		gradients[i] = gradients[i] / fmax(1.0f, float(samples[i]));
 }
 
 // Rendering
@@ -228,6 +324,112 @@ void render_image_space_vectors
 		int32_t x = i % width;
 		int32_t y = i / width;
 		float3 color = make_float3(0.5 + 0.5 * vectors[i], 0);
+//		float3 color = make_float3(0.5 + 0.5 * vectors[i].x, 0, 0);
 		surf2Dwrite(rgb_to_uchar4(color), fb, x * sizeof(uchar4), y);
+	}
+}
+
+__global__
+void render_normalized_vectors
+(
+	const float3 *__restrict__ vectors,
+	cudaSurfaceObject_t fb,
+	uint32_t width,
+	uint32_t height
+)
+{
+	uint32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+	uint32_t stride = blockDim.x * gridDim.x;
+
+	for (uint32_t i = tid; i < width * height; i += stride) {
+		int32_t x = i % width;
+		int32_t y = i / width;
+		float3 color = 0.5 + 0.5 * vectors[i];
+//		float3 color = make_float3(0.5 + 0.5 * vectors[i].x, 0, 0);
+		surf2Dwrite(rgb_to_uchar4(color), fb, x * sizeof(uchar4), y);
+	}
+}
+
+template <>
+__global__
+void render_vector_color <float2>
+(
+	const float2 *__restrict__ colors,
+	cudaSurfaceObject_t fb,
+	uint32_t width,
+	uint32_t height
+)
+{
+	uint32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+	uint32_t stride = blockDim.x * gridDim.x;
+
+	for (uint32_t i = tid; i < width * height; i += stride) {
+		int32_t x = i % width;
+		int32_t y = i / width;
+		float3 color = make_float3(colors[i], 0);
+		surf2Dwrite(rgb_to_uchar4(color), fb, x * sizeof(uchar4), y);
+	}
+}
+
+template <>
+__global__
+void render_vector_color <float3>
+(
+	const float3 *__restrict__ colors,
+	cudaSurfaceObject_t fb,
+	uint32_t width,
+	uint32_t height
+)
+{
+	uint32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+	uint32_t stride = blockDim.x * gridDim.x;
+
+	for (uint32_t i = tid; i < width * height; i += stride) {
+		int32_t x = i % width;
+		int32_t y = i / width;
+		surf2Dwrite(rgb_to_uchar4(colors[i]), fb, x * sizeof(uchar4), y);
+	}
+}
+
+__global__
+void render_triangle_attribute_magnitudes
+(
+	const int32_t *__restrict__ primitives,
+	const float2 *__restrict__ barycentrics,
+	const uint3 *__restrict__ triangles,
+	const float3 *__restrict__ attributes,
+	cudaSurfaceObject_t fb,
+	uint32_t width,
+	uint32_t height
+)
+{
+	uint32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+	uint32_t stride = blockDim.x * gridDim.x;
+
+	for (uint32_t i = tid; i < width * height; i += stride) {
+		int32_t x = i % width;
+		int32_t y = i / width;
+
+		int32_t p = primitives[i];
+		if (p < 0) {
+			surf2Dwrite(make_uchar4(0, 0, 0, 0), fb, x * sizeof(uchar4), y);
+			continue;
+		}
+
+		float2 bary = barycentrics[i];
+		uint3 triangle = triangles[p];
+
+		float3 a0 = attributes[triangle.x];
+		float3 a1 = attributes[triangle.y];
+		float3 a2 = attributes[triangle.z];
+
+		float3 a = (1 - bary.x - bary.y) * a0 + bary.x * a1 + bary.y * a2;
+
+//		float l = powf(fmin(1.0f, length(a)), 0.1f);
+//
+//		float3 blue = l * make_float3(0.2, 0.5, 1.0);
+//		float3 red = (1 - l) * make_float3(1.0, 0.5, 0.2);
+
+		surf2Dwrite(rgb_to_uchar4(0.5 + 0.5 * a), fb, x * sizeof(uchar4), y);
 	}
 }

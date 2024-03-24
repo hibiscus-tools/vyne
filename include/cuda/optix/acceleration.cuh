@@ -50,8 +50,8 @@ OptixTraversableHandle gas_from_mesh(OptixDeviceContext optix_context, const Mes
 
 	ulog_info("ssdfg", "output size = %ul, temporary size = %ul\n", buffer_sizes.tempSizeInBytes, buffer_sizes.outputSizeInBytes);
 
-	CUdeviceptr gas_buffer = cuda_alloc_buffer(buffer_sizes.outputSizeInBytes);
-	CUdeviceptr gas_temporary = cuda_alloc_buffer(buffer_sizes.tempSizeInBytes);
+	CUdeviceptr gas_buffer = cuda_alloc(buffer_sizes.outputSizeInBytes);
+	CUdeviceptr gas_temporary = cuda_alloc(buffer_sizes.tempSizeInBytes);
 
 	OptixTraversableHandle gas;
 

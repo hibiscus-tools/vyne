@@ -4,7 +4,7 @@ project(vyne CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -Wall --expt-relaxed-constexpr")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -Wall --expt-relaxed-constexpr -Xcudafe --diag_suppress=20012")
 
 find_package(Vulkan REQUIRED)
 find_package(glslang REQUIRED)

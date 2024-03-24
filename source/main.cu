@@ -1,8 +1,6 @@
 #include <thread>
 #include <mutex>
 
-#include <microlog/microlog.h>
-
 #include <glm/gtc/quaternion.hpp>
 
 #include <imgui/imgui.h>
@@ -10,7 +8,6 @@
 
 #include <surface_indirect_functions.h>
 
-#include <optix/optix.h>
 #include <optix/optix_stubs.h>
 #include <optix/optix_function_table_definition.h>
 
@@ -22,7 +19,6 @@
 #include "cuda/util.cuh"
 #include "cuda/vector_math.cuh"
 #include "io.hpp"
-#include "shaders/optix/ssdfg.cuh"
 #include "ssdfg/contexts.cuh"
 #include "ssdfg/kernels.cuh"
 #include "util.hpp"
@@ -204,14 +200,15 @@ int main()
 	const vk::Extent2D extent { 256, 256 };
 
 	// Load the meshes
-	Mesh target = load_geometry(VYNE_ROOT "/data/spot.obj").front();
-	Mesh source = load_geometry(VYNE_ROOT "/data/sphere.obj").front();
+	Mesh target = load_geometry(VYNE_ROOT "/data/spot.obj").front().deduplicate();
+	Mesh source = load_geometry(VYNE_ROOT "/data/sphere.obj").front().deduplicate();
 	auto target_src = SilhouetteRenderContext::from(drc, optix_context, program_groups, target, extent);
 	auto source_src = SilhouetteRenderContext::from(drc, optix_context, program_groups, source, extent);
 
 	// Camera parameters
 	Camera camera;
 	Transform camera_transform;
+	camera_transform.position = { 0, 0, -5 };
 	glfwSetWindowUserPointer(drc.window->handle, &camera_transform);
 
 	// Differentiable rendering process
@@ -227,20 +224,26 @@ int main()
 
 	auto sampler = littlevk::SamplerCompiler(drc.device, drc.dal);
 	auto motion_gradients_lfb = LinkedFramebuffer::from(drc, image_info, sampler);
+	auto projected_gradients_lfb = LinkedFramebuffer::from(drc, image_info, sampler);
+	auto vertex_gradients_lfb = LinkedFramebuffer::from(drc, image_info, sampler);
 
-	float2 *motion_gradients = (float2 *) cuda_alloc_buffer(sizeof(float2) * extent.width * extent.height);
+	auto motion_gradients = cuda_alloc_buffer <float2> (extent.width * extent.height);
+	auto projected_gradients = cuda_alloc_buffer <float3> (extent.width * extent.height);
 
+	bool update = false;
 	auto render = [&]() {
+		source_src.update(optix_context, source);
+
 		camera.aspect = float(extent.width)/float(extent.height);
 		target_src.render(pipeline, camera, camera_transform);
 		source_src.render(pipeline, camera, camera_transform);
 
 		image_space_motion_gradients <<< 64, 128 >>>
 		(
-			target_src.sdf,
-			target_src.gradients,
-			source_src.sdf,
-			source_src.gradients,
+			target_src.image_space.sdf,
+			target_src.image_space.gradients,
+			source_src.image_space.sdf,
+			source_src.image_space.gradients,
 			motion_gradients,
 			extent.width,
 			extent.height
@@ -257,12 +260,86 @@ int main()
 		);
 
 		cudaDeviceSynchronize();
+
+		RayFrame rayframe = camera.rayframe(camera_transform);
+
+		project_image_space_vectors <<< 64, 128 >>>
+		(
+			source_src.render_targets.visibility,
+			source_src.render_targets.depth,
+			motion_gradients,
+			projected_gradients,
+			glm_to_float3(rayframe.horizontal),
+			glm_to_float3(rayframe.vertical),
+			extent.width,
+			extent.height
+		);
+
+		cudaDeviceSynchronize();
+
+		render_normalized_vectors <<< 64, 128 >>>
+		(
+			projected_gradients,
+			projected_gradients_lfb.surface,
+			extent.width,
+			extent.height
+		);
+
+		cudaDeviceSynchronize();
+
+		cudaMemset(source_src.mesh.counts, 0, sizeof(uint) * source.positions.size());
+		cudaMemset(source_src.mesh.vgradients, 0, sizeof(float3) * source.positions.size());
+
+		scatter_reduce_mesh_gradient <<< 64, 128 >>>
+		(
+			projected_gradients,
+			source_src.render_targets.barycentrics,
+			source_src.mesh.triangles,
+			source_src.render_targets.primitives,
+			source_src.mesh.vgradients,
+			source_src.mesh.counts,
+			extent.width,
+			extent.height
+		);
+
+		scatter_reduce_integrate <<< 64, 64 >>>
+		(
+			source_src.mesh.vgradients,
+			source_src.mesh.counts,
+			source.positions.size()
+		);
+
+		cudaDeviceSynchronize();
+
+		render_triangle_attribute_magnitudes <<< 64, 128 >>>
+		(
+			source_src.render_targets.primitives,
+			source_src.render_targets.barycentrics,
+			source_src.mesh.triangles,
+			source_src.mesh.vgradients,
+			vertex_gradients_lfb.surface,
+			extent.width,
+			extent.height
+		);
+
+		cudaDeviceSynchronize();
+
+		// Update the mesh vertex positions
+		if (update) {
+			std::vector <glm::vec3> vgradients;
+			vgradients.resize(source.positions.size());
+			cuda_download((CUdeviceptr) source_src.mesh.vgradients, vgradients);
+
+			for (uint32_t i = 0; i < source.positions.size(); i++) {
+				source.positions[i] -= 0.1f * vgradients[i];
+			}
+		}
 	};
 
 	std::vector <vk::DescriptorSet> views;
-	views.push_back(target_src.visibility_lfb.imgui);
+	views.push_back(target_src.render_lfb.imgui);
 	views.push_back(target_src.gradients_lfb.imgui);
-	views.push_back(source_src.visibility_lfb.imgui);
+	views.push_back(source_src.render_lfb.imgui);
 	views.push_back(source_src.gradients_lfb.imgui);
 
 	// Render loop
@@ -286,6 +363,8 @@ int main()
 		if (ImGui::BeginMainMenuBar()) {
 			if (ImGui::BeginMenu("View")) {
 				if (ImGui::BeginMenu("Target")) {
+					if (ImGui::MenuItem("Render"))
+						views.push_back(target_src.render_lfb.imgui);
 					if (ImGui::MenuItem("Silhouette"))
 						views.push_back(target_src.visibility_lfb.imgui);
 					if (ImGui::MenuItem("Silhouette boundary"))
@@ -301,16 +380,20 @@ int main()
 				}
 
 				if (ImGui::BeginMenu("Source")) {
+					if (ImGui::MenuItem("Render"))
+						views.push_back(source_src.render_lfb.imgui);
 					if (ImGui::MenuItem("Silhouette"))
 						views.push_back(source_src.visibility_lfb.imgui);
 					if (ImGui::MenuItem("Silhouette boundary"))
 						views.push_back(source_src.boundary_lfb.imgui);
-					if (ImGui::MenuItem("Depth map"))
-						views.push_back(source_src.depth_lfb.imgui);
 					if (ImGui::MenuItem("Signed distance field"))
 						views.push_back(source_src.sdf_lfb.imgui);
 					if (ImGui::MenuItem("SDF gradients"))
 						views.push_back(source_src.gradients_lfb.imgui);
+					if (ImGui::MenuItem("Depth map"))
+						views.push_back(source_src.depth_lfb.imgui);
+					if (ImGui::MenuItem("Barycentrics"))
+						views.push_back(source_src.barycentrics_lfb.imgui);
 
 					ImGui::EndMenu();
 				}
@@ -318,11 +401,23 @@ int main()
 				if (ImGui::BeginMenu("Additional")) {
 					if (ImGui::MenuItem("Motion gradients"))
 						views.push_back(motion_gradients_lfb.imgui);
+					if (ImGui::MenuItem("Projected gradients"))
+						views.push_back(projected_gradients_lfb.imgui);
+					if (ImGui::MenuItem("Vertex gradients"))
+						views.push_back(vertex_gradients_lfb.imgui);
 
 					ImGui::EndMenu();
 				}
 
 				ImGui::EndMenu();
+			}
+
+			if (ImGui::MenuItem("Play")) {
+				update = true;
+			}
+
+			if (ImGui::MenuItem("Pause")) {
+				update = false;
 			}
 
 			ImGui::EndMainMenuBar();

@@ -11,6 +11,7 @@ static Mesh assimp_process_mesh(aiMesh *m, const aiScene *scene, const std::stri
 {
 	std::vector <glm::vec3> vertices;
 	std::vector <glm::vec3> normals;
+	std::vector <glm::vec2> uvs;
         std::vector <glm::uvec3> triangles;
 
 	// Process all the mesh's vertices
@@ -30,6 +31,8 @@ static Mesh assimp_process_mesh(aiMesh *m, const aiScene *scene, const std::stri
 		} else {
 			normals.push_back({ 0.0f, 0.0f, 0.0f });
 		}
+
+		uvs.push_back({ 0.0f, 0.0f });
 	}
 
 	// Process all the mesh's triangles
@@ -47,7 +50,7 @@ static Mesh assimp_process_mesh(aiMesh *m, const aiScene *scene, const std::stri
 		});
 	}
 
-	return Mesh { vertices, normals, {}, triangles };
+	return Mesh { vertices, normals, uvs, triangles };
 }
 
 static std::vector <Mesh> assimp_process_node(aiNode *node, const aiScene *scene, const std::string &directory)

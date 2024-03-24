@@ -1,6 +1,9 @@
+*.egg-info/
 .cache/
 .idea/
+.venv/
 .vscode/
 bin/
+build/
 cmake-build*/
 compile_commands.json
