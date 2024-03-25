@@ -38,6 +38,10 @@ struct OptixProgramType {
 
 static void context_logger(unsigned int level, const char *tag, const char *message, void *)
 {
+	// If not print/status
+	if (level == 4)
+		return;
+
 	ulog_info("optix", "%s %s\n", tag, message);
 }
 

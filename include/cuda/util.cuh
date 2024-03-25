@@ -38,6 +38,7 @@ CUdeviceptr cuda_vector_buffer(const std::vector <T> &buffer)
 template <typename T>
 void cuda_element_copy(CUdeviceptr ptr, const T &value)
 {
+	// TODO: error handling
 	cudaMemcpy((void *) ptr, &value, sizeof(T), cudaMemcpyHostToDevice);
 }
 

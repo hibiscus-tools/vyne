@@ -4,12 +4,14 @@ project(vyne CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -Wall --expt-relaxed-constexpr -Xcudafe --diag_suppress=20012")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -Wall --expt-relaxed-constexpr -Xcudafe \"--diag_suppress=20012 --diag_suppress=20011 --diag_suppress=20014\"")
 
 find_package(Vulkan REQUIRED)
 find_package(glslang REQUIRED)
 find_package(CUDAToolkit 12.0 REQUIRED)
+find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
 
+add_subdirectory(dependencies/pybind11)
 add_subdirectory(dependencies/oak)
 
 include_directories(.
@@ -38,20 +40,26 @@ add_custom_target(optix_shaders
 	DEPENDS optix_shaders_compile
 )
 
-# Silhouette signed-distance field gradients
-add_executable(ssdfg
-	source/main.cu
+# Vyne python library
+add_library(vyne MODULE
+	source/ext/vyne.cu
 	source/io.cpp
-	source/cuda/interop.cu
-	source/ssdfg/contexts.cu
-	source/ssdfg/kernels.cu
 )
 
-target_link_libraries(
-	ssdfg
-	oak assimp glfw SPIRV
+target_link_libraries(vyne PRIVATE
+	oak assimp pybind11::module
+	glfw SPIRV
 	glslang::glslang Vulkan::Vulkan
 	glslang::glslang-default-resource-limits
 )
 
-add_dependencies(ssdfg optix_shaders)
+pybind11_extension(vyne)
+
+# Silhouette signed-distance field gradients
+add_dependencies(vyne optix_shaders)
+
+# Copy as a python package
+add_custom_command(TARGET vyne
+	POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:vyne>
+		"${CMAKE_SOURCE_DIR}/.venv/lib/python3.11/site-packages"
+)
