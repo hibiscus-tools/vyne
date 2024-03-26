@@ -106,6 +106,18 @@ float2 operator/(float2 A, float2 B)
 }
 
 __forceinline__ __host__ __device__
+float2 operator/(float2 V, float k)
+{
+	return make_float2(V.x / k, V.y / k);
+}
+
+__forceinline__ __host__ __device__
+float2 operator/(float k, float2 V)
+{
+	return make_float2(V.x / k, V.y / k);
+}
+
+__forceinline__ __host__ __device__
 float3 operator/(float3 A, float3 B)
 {
 	return make_float3(A.x / B.x, A.y / B.y, A.z / B.z);

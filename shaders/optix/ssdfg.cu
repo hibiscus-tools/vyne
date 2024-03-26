@@ -20,9 +20,8 @@ extern "C" __global__ void __raygen__()
 	uint index = idx.x + idx.y * extent.x;
 	packet.visibility[index] = 0;
 	packet.depth[index] = -1;
-	packet.primitive[index] = -1;
+	packet.index[index] = -1;
 	packet.barycentrics[index] = make_float2(0, 0);
-	packet.render[index] = make_float3(0, 0, 0);
 
 	optixTrace
 	(
@@ -40,18 +39,8 @@ extern "C" __global__ void __closesthit__()
 	uint index = optixGetPayload_0();
 	packet.visibility[index] = 1;
 	packet.depth[index] = optixGetRayTmax();
-	packet.primitive[index] = optixGetPrimitiveIndex();
+	packet.index[index] = optixGetPrimitiveIndex();
 	packet.barycentrics[index] = optixGetTriangleBarycentrics();
-
-	constexpr float3 COLOR_WHEEL[4] = {
-		float3 { 1, 0.2, 0.5 },
-		float3 { 0.5, 1, 0.2 },
-		float3 { 0.2, 0.5 },
-		float3 { 0.2, 0.8, 0.8 }
-	};
-
-	int p = optixGetPrimitiveIndex();
-	packet.render[index] = COLOR_WHEEL[p % 4];
 }
 
 extern "C" __global__ void __miss__() {}

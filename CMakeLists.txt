@@ -4,7 +4,8 @@ project(vyne CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -Wall --expt-relaxed-constexpr -Xcudafe \"--diag_suppress=20012 --diag_suppress=20011 --diag_suppress=20014\"")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -Wall --expt-relaxed-constexpr")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe \"--diag_suppress=20012 --diag_suppress=20011 --diag_suppress=20014\"")
 
 find_package(Vulkan REQUIRED)
 find_package(glslang REQUIRED)
@@ -44,6 +45,7 @@ add_custom_target(optix_shaders
 add_library(vyne MODULE
 	source/ext/vyne.cu
 	source/io.cpp
+	source/ssdfg/kernels.cu
 )
 
 target_link_libraries(vyne PRIVATE

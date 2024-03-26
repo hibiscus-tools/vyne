@@ -21,9 +21,8 @@ struct Packet {
 	// Framebuffers and resolution
 	float *visibility;
 	float *depth;
-	int32_t *primitive;
+	int32_t *index;
 	float2 *barycentrics;
-	float3 *render;
 
 	uint2 resolution;
 };
